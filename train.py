@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import tensorflow as tf
 import sonnet as snt
+import tensorboardX
 
 from dnc import dnc
 from dnc import repeat_copy
@@ -28,7 +29,7 @@ FLAGS = tf.flags.FLAGS
 
 # Model parameters
 tf.flags.DEFINE_integer("hidden_size", 64, "Size of LSTM hidden layer.")
-tf.flags.DEFINE_integer("memory_size", 16, "The number of memory slots.")
+tf.flags.DEFINE_integer("memory_size", 100, "The number of memory slots.")
 tf.flags.DEFINE_integer("word_size", 16, "The width of each memory slot.")
 tf.flags.DEFINE_integer("num_write_heads", 1, "Number of memory write heads.")
 tf.flags.DEFINE_integer("num_read_heads", 4, "Number of memory read heads.")
@@ -42,27 +43,27 @@ tf.flags.DEFINE_float("optimizer_epsilon", 1e-10,
                       "Epsilon used for RMSProp optimizer.")
 
 # Task parameters
-tf.flags.DEFINE_integer("batch_size", 16, "Batch size for training.")
-tf.flags.DEFINE_integer("num_bits", 4, "Dimensionality of each vector to copy")
+tf.flags.DEFINE_integer("batch_size", 100, "Batch size for training.")
+tf.flags.DEFINE_integer("num_bits", 6, "Dimensionality of each vector to copy")
 tf.flags.DEFINE_integer(
     "min_length", 1,
     "Lower limit on number of vectors in the observation pattern to copy")
 tf.flags.DEFINE_integer(
-    "max_length", 2,
+    "max_length", 50,
     "Upper limit on number of vectors in the observation pattern to copy")
 tf.flags.DEFINE_integer("min_repeats", 1,
                         "Lower limit on number of copy repeats.")
-tf.flags.DEFINE_integer("max_repeats", 2,
+tf.flags.DEFINE_integer("max_repeats", 1,
                         "Upper limit on number of copy repeats.")
 
 # Training options.
-tf.flags.DEFINE_integer("num_training_iterations", 100000,
+tf.flags.DEFINE_integer("num_training_iterations", 300000,
                         "Number of iterations to train for.")
 tf.flags.DEFINE_integer("report_interval", 100,
                         "Iterations between reports (samples, valid loss).")
-tf.flags.DEFINE_string("checkpoint_dir", "/tmp/tf/dnc",
+tf.flags.DEFINE_string("checkpoint_dir", "checkpoints",
                        "Checkpointing directory.")
-tf.flags.DEFINE_integer("checkpoint_interval", -1,
+tf.flags.DEFINE_integer("checkpoint_interval", 100,
                         "Checkpointing step interval.")
 
 
@@ -104,6 +105,9 @@ def train(num_training_iterations, report_interval):
   output = tf.round(
       tf.expand_dims(dataset_tensors.mask, -1) * tf.sigmoid(output_logits))
 
+  errors = tf.reduce_sum(tf.reduce_sum(tf.abs(output - dataset_tensors.target), axis=2) * dataset_tensors.mask, axis=0)
+  incorrect_count = tf.count_nonzero(errors)
+
   train_loss = dataset.cost(output_logits, dataset_tensors.target,
                             dataset_tensors.mask)
 
@@ -126,6 +130,7 @@ def train(num_training_iterations, report_interval):
       zip(grads, trainable_variables), global_step=global_step)
 
   saver = tf.train.Saver()
+  writer = tensorboardX.SummaryWriter("output")
 
   if FLAGS.checkpoint_interval > 0:
     hooks = [
@@ -145,17 +150,20 @@ def train(num_training_iterations, report_interval):
     total_loss = 0
 
     for train_iteration in range(start_iteration, num_training_iterations):
+      print(train_iteration)
       _, loss = sess.run([train_step, train_loss])
       total_loss += loss
 
       if (train_iteration + 1) % report_interval == 0:
-        dataset_tensors_np, output_np = sess.run([dataset_tensors, output])
+        dataset_tensors_np, output_np, incorrect_count_np = sess.run([dataset_tensors, output, incorrect_count])
         dataset_string = dataset.to_human_readable(dataset_tensors_np,
                                                    output_np)
         tf.logging.info("%d: Avg training loss %f.\n%s",
                         train_iteration, total_loss / report_interval,
                         dataset_string)
+        writer.add_scalar("Loss", total_loss / report_interval, train_iteration)
         total_loss = 0
+        writer.add_scalar("Accuracy", (1 - incorrect_count_np / FLAGS.batch_size) * 100, train_iteration)
 
 
 def main(unused_argv):
